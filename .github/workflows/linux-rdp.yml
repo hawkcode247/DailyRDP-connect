@@ -1,270 +1,81 @@
-name: Temporary Linux RDP
+name: Ubuntu Web Desktop (Auto-Pass & 1-Click)
 
 on:
   workflow_dispatch:
-    inputs:
-      hours:
-        description: "How many hours should the Linux desktop stay online?"
-        required: true
-        default: "2"
-        type: choice
-        options:
-          - "1"
-          - "2"
-          - "3"
-          - "4"
-          - "5"
-          - "6"
-
-permissions:
-  contents: read
 
 jobs:
-  linux-rdp:
-    name: Ubuntu Linux Desktop
+  desktop:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
+      - name: Free Maximum Storage
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
 
-      # ==================================================
-      # 1. Install desktop environment and XRDP
-      # ==================================================
-      - name: Install XFCE and XRDP
+      - name: Install Desktop & VNC Tools
         run: |
           sudo apt-get update
-
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 \
-            xfce4-goodies \
-            xrdp \
-            dbus-x11 \
-            policykit-1 \
-            openssl \
-            curl \
-            wget
+            xfce4 xfce4-terminal \
+            tigervnc-standalone-server tigervnc-common \
+            novnc websockify curl wget openssl
 
-      # ==================================================
-      # 2. Create RDP user
-      # ==================================================
-      - name: Create RDP user
-        shell: bash
+      - name: Setup Cloudflare Quick Tunnel
         run: |
-          RDP_USER="rdpuser"
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          rm -f cloudflared-linux-amd64.deb
 
-          RDP_PASSWORD="$(openssl rand -base64 48 | \
-            tr -dc 'A-Za-z0-9' | \
-            head -c 28)"
-
-          sudo useradd \
-            --create-home \
-            --shell /bin/bash \
-            "$RDP_USER" || true
-
-          echo "$RDP_USER:$RDP_PASSWORD" | sudo chpasswd
-
-          sudo usermod -aG sudo "$RDP_USER"
-
-          echo "RDP_USER=$RDP_USER" >> "$GITHUB_ENV"
-          echo "RDP_PASSWORD=$RDP_PASSWORD" >> "$GITHUB_ENV"
-
-      # ==================================================
-      # 3. Configure XFCE
-      # ==================================================
-      - name: Configure XFCE
+      - name: Generate Random Password & Start VNC
+        id: vnc_setup
         run: |
-          sudo -u "$RDP_USER" bash -c \
-            'echo "startxfce4" > "$HOME/.xsession"'
+          # Automatically generate a 10-character alphanumeric password
+          AUTO_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 10)
+          
+          # Set VNC password
+          mkdir -p ~/.vnc
+          echo "$AUTO_PASS" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
 
-          sudo chown \
-            "$RDP_USER:$RDP_USER" \
-            "/home/$RDP_USER/.xsession"
-
-      # ==================================================
-      # 4. Configure XRDP
-      # ==================================================
-      - name: Configure XRDP
-        run: |
-          sudo cp /etc/xrdp/startwm.sh \
-            /etc/xrdp/startwm.sh.backup
-
-          sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
+          # Configure XFCE startup
+          cat << 'EOF' > ~/.vnc/xstartup
           #!/bin/sh
-
+          unset SESSION_MANAGER
           unset DBUS_SESSION_BUS_ADDRESS
-          unset XDG_RUNTIME_DIR
-
-          export XDG_CURRENT_DESKTOP=XFCE
-          export XDG_SESSION_DESKTOP=xfce
-          export XDG_CONFIG_DIRS=/etc/xdg/xdg-xfce:/etc/xdg
-          export XDG_DATA_DIRS=/usr/share/xfce4:/usr/local/share:/usr/share
-
           exec startxfce4
           EOF
+          chmod +x ~/.vnc/xstartup
 
-          sudo chmod +x /etc/xrdp/startwm.sh
+          # Start TigerVNC & noVNC
+          vncserver :1 -geometry 1366x768 -depth 24
+          websockify --web /usr/share/novnc 6080 localhost:5901 &
 
-          sudo systemctl enable xrdp
-          sudo systemctl restart xrdp
+          # Mask password in logs and save as output
+          echo "::add-mask::$AUTO_PASS"
+          echo "PASS=$AUTO_PASS" >> "$GITHUB_OUTPUT"
 
-          sleep 3
-
-      # ==================================================
-      # 5. Verify XRDP
-      # ==================================================
-      - name: Verify XRDP
+      - name: Launch Tunnel & Publish Access Link
         run: |
-          echo "XRDP service:"
-          sudo systemctl --no-pager status xrdp || true
+          # Start tunnel
+          cloudflared tunnel --url http://localhost:6080 > cloudflared.log 2>&1 &
+          sleep 6
 
-          echo
-          echo "Listening on:"
-          sudo ss -lntp | grep ':3389' || true
+          TUNNEL_URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' cloudflared.log | head -n 1)
+          AUTO_PASS="${{ steps.vnc_setup.outputs.PASS }}"
+          AUTOLOGIN_LINK="$TUNNEL_URL/vnc.html?autoconnect=true&password=$AUTO_PASS"
 
-      # ==================================================
-      # 6. Install Cloudflare cloudflared
-      # ==================================================
-      - name: Install cloudflared
+          # Print to the job run summary tab (renders formatted markdown in GitHub UI)
+          echo "### 🚀 Ubuntu Desktop is Online" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **One-Click Auto-Login**: [Open Web Desktop]($AUTOLOGIN_LINK)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Direct URL**: \`$TUNNEL_URL/vnc.html\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Password**: \`$AUTO_PASS\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Max Runtime**: Up to 6 hours" >> $GITHUB_STEP_SUMMARY
+
+      - name: Keep-Alive Loop
         run: |
-          curl -L \
-            --fail \
-            --output cloudflared.deb \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-
-          sudo dpkg -i cloudflared.deb
-
-          cloudflared --version
-
-      # ==================================================
-      # 7. Start Cloudflare Tunnel
-      # ==================================================
-      - name: Start Cloudflare Tunnel
-        env:
-          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
-        run: |
-          if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
-            echo "ERROR:"
-            echo "CLOUDFLARE_TUNNEL_TOKEN is not configured."
-            exit 1
-          fi
-
-          nohup cloudflared tunnel \
-            --no-autoupdate \
-            run \
-            --token "$CLOUDFLARE_TUNNEL_TOKEN" \
-            > "$HOME/cloudflared.log" 2>&1 &
-
-          CLOUDFLARE_PID=$!
-
-          echo "$CLOUDFLARE_PID" \
-            > "$HOME/cloudflared.pid"
-
-          sleep 10
-
-          echo
-          echo "Cloudflare process:"
-          ps -fp "$CLOUDFLARE_PID" || true
-
-          echo
-          echo "Cloudflare log:"
-          tail -n 50 "$HOME/cloudflared.log" || true
-
-      # ==================================================
-      # 8. Final connectivity check
-      # ==================================================
-      - name: Check RDP environment
-        run: |
-          echo
-          echo "=========================================="
-          echo "XRDP"
-          echo "=========================================="
-
-          sudo systemctl is-active xrdp || true
-
-          echo
-          echo "=========================================="
-          echo "PORT 3389"
-          echo "=========================================="
-
-          sudo ss -lntp | grep ':3389' || true
-
-          echo
-          echo "=========================================="
-          echo "CLOUDFLARED"
-          echo "=========================================="
-
-          pgrep -a cloudflared || true
-
-          echo
-          echo "=========================================="
-          echo "CLOUDFLARE LOG"
-          echo "=========================================="
-
-          tail -n 30 "$HOME/cloudflared.log" || true
-
-      # ==================================================
-      # 9. Display connection information
-      # ==================================================
-      - name: Display RDP information
-        run: |
-          echo
-          echo "################################################"
-          echo "#                                              #"
-          echo "#           LINUX RDP IS READY                #"
-          echo "#                                              #"
-          echo "################################################"
-          echo
-          echo "Username:"
-          echo "$RDP_USER"
-          echo
-          echo "Password:"
-          echo "$RDP_PASSWORD"
-          echo
-          echo "Cloudflare hostname:"
-          echo "rdp.example.com"
-          echo
-          echo "Local RDP service:"
-          echo "127.0.0.1:3389"
-          echo
-          echo "################################################"
-          echo "# Keep this workflow running while connected. #"
-          echo "################################################"
-          echo
-
-      # ==================================================
-      # 10. Keep machine alive
-      # ==================================================
-      - name: Keep desktop alive
-        shell: bash
-        run: |
-          HOURS="${{ inputs.hours }}"
-          REMAINING=$((HOURS * 3600))
-
-          echo "Desktop lifetime: $HOURS hour(s)"
-
-          while [ "$REMAINING" -gt 0 ]; do
-
+          for i in {1..350}; do
             sleep 60
-
-            REMAINING=$((REMAINING - 60))
-
-            if [ $((REMAINING % 600)) -eq 0 ]; then
-              echo "Approximately $((REMAINING / 60)) minutes remaining."
-            fi
-
           done
-
-          echo "Desktop lifetime expired."
-
-      # ==================================================
-      # 11. Cleanup
-      # ==================================================
-      - name: Stop Cloudflare Tunnel
-        if: always()
-        run: |
-          if [ -f "$HOME/cloudflared.pid" ]; then
-            PID="$(cat "$HOME/cloudflared.pid")"
-            kill "$PID" 2>/dev/null || true
-          fi
-
-          sudo systemctl stop xrdp 2>/dev/null || true
