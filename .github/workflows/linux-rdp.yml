@@ -1,0 +1,270 @@
+name: Temporary Linux RDP
+
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: "How many hours should the Linux desktop stay online?"
+        required: true
+        default: "2"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "4"
+          - "5"
+          - "6"
+
+permissions:
+  contents: read
+
+jobs:
+  linux-rdp:
+    name: Ubuntu Linux Desktop
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+
+      # ==================================================
+      # 1. Install desktop environment and XRDP
+      # ==================================================
+      - name: Install XFCE and XRDP
+        run: |
+          sudo apt-get update
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 \
+            xfce4-goodies \
+            xrdp \
+            dbus-x11 \
+            policykit-1 \
+            openssl \
+            curl \
+            wget
+
+      # ==================================================
+      # 2. Create RDP user
+      # ==================================================
+      - name: Create RDP user
+        shell: bash
+        run: |
+          RDP_USER="rdpuser"
+
+          RDP_PASSWORD="$(openssl rand -base64 48 | \
+            tr -dc 'A-Za-z0-9' | \
+            head -c 28)"
+
+          sudo useradd \
+            --create-home \
+            --shell /bin/bash \
+            "$RDP_USER" || true
+
+          echo "$RDP_USER:$RDP_PASSWORD" | sudo chpasswd
+
+          sudo usermod -aG sudo "$RDP_USER"
+
+          echo "RDP_USER=$RDP_USER" >> "$GITHUB_ENV"
+          echo "RDP_PASSWORD=$RDP_PASSWORD" >> "$GITHUB_ENV"
+
+      # ==================================================
+      # 3. Configure XFCE
+      # ==================================================
+      - name: Configure XFCE
+        run: |
+          sudo -u "$RDP_USER" bash -c \
+            'echo "startxfce4" > "$HOME/.xsession"'
+
+          sudo chown \
+            "$RDP_USER:$RDP_USER" \
+            "/home/$RDP_USER/.xsession"
+
+      # ==================================================
+      # 4. Configure XRDP
+      # ==================================================
+      - name: Configure XRDP
+        run: |
+          sudo cp /etc/xrdp/startwm.sh \
+            /etc/xrdp/startwm.sh.backup
+
+          sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
+          #!/bin/sh
+
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export XDG_CONFIG_DIRS=/etc/xdg/xdg-xfce:/etc/xdg
+          export XDG_DATA_DIRS=/usr/share/xfce4:/usr/local/share:/usr/share
+
+          exec startxfce4
+          EOF
+
+          sudo chmod +x /etc/xrdp/startwm.sh
+
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+
+          sleep 3
+
+      # ==================================================
+      # 5. Verify XRDP
+      # ==================================================
+      - name: Verify XRDP
+        run: |
+          echo "XRDP service:"
+          sudo systemctl --no-pager status xrdp || true
+
+          echo
+          echo "Listening on:"
+          sudo ss -lntp | grep ':3389' || true
+
+      # ==================================================
+      # 6. Install Cloudflare cloudflared
+      # ==================================================
+      - name: Install cloudflared
+        run: |
+          curl -L \
+            --fail \
+            --output cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+
+          sudo dpkg -i cloudflared.deb
+
+          cloudflared --version
+
+      # ==================================================
+      # 7. Start Cloudflare Tunnel
+      # ==================================================
+      - name: Start Cloudflare Tunnel
+        env:
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+        run: |
+          if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+            echo "ERROR:"
+            echo "CLOUDFLARE_TUNNEL_TOKEN is not configured."
+            exit 1
+          fi
+
+          nohup cloudflared tunnel \
+            --no-autoupdate \
+            run \
+            --token "$CLOUDFLARE_TUNNEL_TOKEN" \
+            > "$HOME/cloudflared.log" 2>&1 &
+
+          CLOUDFLARE_PID=$!
+
+          echo "$CLOUDFLARE_PID" \
+            > "$HOME/cloudflared.pid"
+
+          sleep 10
+
+          echo
+          echo "Cloudflare process:"
+          ps -fp "$CLOUDFLARE_PID" || true
+
+          echo
+          echo "Cloudflare log:"
+          tail -n 50 "$HOME/cloudflared.log" || true
+
+      # ==================================================
+      # 8. Final connectivity check
+      # ==================================================
+      - name: Check RDP environment
+        run: |
+          echo
+          echo "=========================================="
+          echo "XRDP"
+          echo "=========================================="
+
+          sudo systemctl is-active xrdp || true
+
+          echo
+          echo "=========================================="
+          echo "PORT 3389"
+          echo "=========================================="
+
+          sudo ss -lntp | grep ':3389' || true
+
+          echo
+          echo "=========================================="
+          echo "CLOUDFLARED"
+          echo "=========================================="
+
+          pgrep -a cloudflared || true
+
+          echo
+          echo "=========================================="
+          echo "CLOUDFLARE LOG"
+          echo "=========================================="
+
+          tail -n 30 "$HOME/cloudflared.log" || true
+
+      # ==================================================
+      # 9. Display connection information
+      # ==================================================
+      - name: Display RDP information
+        run: |
+          echo
+          echo "################################################"
+          echo "#                                              #"
+          echo "#           LINUX RDP IS READY                #"
+          echo "#                                              #"
+          echo "################################################"
+          echo
+          echo "Username:"
+          echo "$RDP_USER"
+          echo
+          echo "Password:"
+          echo "$RDP_PASSWORD"
+          echo
+          echo "Cloudflare hostname:"
+          echo "rdp.example.com"
+          echo
+          echo "Local RDP service:"
+          echo "127.0.0.1:3389"
+          echo
+          echo "################################################"
+          echo "# Keep this workflow running while connected. #"
+          echo "################################################"
+          echo
+
+      # ==================================================
+      # 10. Keep machine alive
+      # ==================================================
+      - name: Keep desktop alive
+        shell: bash
+        run: |
+          HOURS="${{ inputs.hours }}"
+          REMAINING=$((HOURS * 3600))
+
+          echo "Desktop lifetime: $HOURS hour(s)"
+
+          while [ "$REMAINING" -gt 0 ]; do
+
+            sleep 60
+
+            REMAINING=$((REMAINING - 60))
+
+            if [ $((REMAINING % 600)) -eq 0 ]; then
+              echo "Approximately $((REMAINING / 60)) minutes remaining."
+            fi
+
+          done
+
+          echo "Desktop lifetime expired."
+
+      # ==================================================
+      # 11. Cleanup
+      # ==================================================
+      - name: Stop Cloudflare Tunnel
+        if: always()
+        run: |
+          if [ -f "$HOME/cloudflared.pid" ]; then
+            PID="$(cat "$HOME/cloudflared.pid")"
+            kill "$PID" 2>/dev/null || true
+          fi
+
+          sudo systemctl stop xrdp 2>/dev/null || true
