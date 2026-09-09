@@ -45,10 +45,10 @@ jobs:
       - name: Setup Multi-User VNC Desktop & Auto Password
         id: setup_desktop
         run: |
-          # 1. Generate random 10-character alphanumeric password
+          # 1. Generate random 10-character password
           AUTO_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 10)
 
-          # 2. Sync password with 'runner' system account (for system / sudo auth)
+          # 2. Sync password with 'runner' system account
           echo "runner:$AUTO_PASS" | sudo chpasswd
 
           # 3. Configure VNC password
@@ -56,7 +56,16 @@ jobs:
           echo "$AUTO_PASS" | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || printf "$AUTO_PASS\n$AUTO_PASS\nn\n" | vncpasswd
           chmod 600 ~/.vnc/passwd
 
-          # 4. Create XFCE session startup script
+          # 4. Configure TigerVNC for native multi-client sharing via config file
+          cat << 'EOF' > ~/.vnc/config
+          geometry=1366x768
+          depth=24
+          securitytypes=vncauth
+          AlwaysShared=1
+          NeverShared=0
+          EOF
+
+          # 5. Create XFCE session startup script
           cat << 'EOF' > ~/.vnc/xstartup
           #!/bin/sh
           unset SESSION_MANAGER
@@ -65,14 +74,14 @@ jobs:
           EOF
           chmod +x ~/.vnc/xstartup
 
-          # 5. Start TigerVNC with multi-client sharing enabled (-shared -NeverShared=0)
+          # 6. Start TigerVNC server cleanly on display :1
           VNC_CMD=$(command -v vncserver || command -v tigervncserver)
-          $VNC_CMD :1 -geometry 1366x768 -depth 24 -shared -NeverShared=0
+          $VNC_CMD :1
 
-          # 6. Start HTML5 websockify bridge with keepalive heartbeat
+          # 7. Start HTML5 websockify bridge with keepalive heartbeat
           websockify --web /usr/share/novnc --heartbeat 30 6080 localhost:5901 &
 
-          # Export password to subsequent workflow steps
+          # Export password to subsequent steps
           echo "PASS=$AUTO_PASS" >> "$GITHUB_OUTPUT"
 
       - name: Start Cloudflare Tunnel (Web GUI)
@@ -106,7 +115,7 @@ jobs:
       - name: Start SSH Terminal (tmate Multi-User)
         id: tmate_setup
         run: |
-          # Start tmate socket in background with mouse support
+          # Start tmate in background with mouse support enabled
           tmate -S /tmp/tmate.sock new-session -d -s main
           tmate -S /tmp/tmate.sock set-option -g mouse on
           tmate -S /tmp/tmate.sock wait tmate-ready
