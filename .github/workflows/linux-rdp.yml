@@ -23,10 +23,12 @@ jobs:
       - name: Install Desktop (XFCE4) & VNC Components
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          # Explicitly include tigervnc-tools to provide the 'vncpasswd' command
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             xfce4 \
             xfce4-terminal \
             tigervnc-standalone-server \
+            tigervnc-tools \
             tigervnc-common \
             novnc \
             websockify \
@@ -43,15 +45,15 @@ jobs:
       - name: Configure Desktop & Start VNC Server
         id: vnc_setup
         run: |
-          # 1. Generate a random 10-character password
+          # 1. Generate random 10-character password
           AUTO_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 10)
 
-          # 2. Configure VNC password
+          # 2. Configure VNC password (supports both TigerVNC -f and standard stdin)
           mkdir -p ~/.vnc
-          echo "$AUTO_PASS" | vncpasswd -f > ~/.vnc/passwd
+          echo "$AUTO_PASS" | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || printf "$AUTO_PASS\n$AUTO_PASS\nn\n" | vncpasswd
           chmod 600 ~/.vnc/passwd
 
-          # 3. Configure XFCE session startup script
+          # 3. Configure XFCE session startup
           cat << 'EOF' > ~/.vnc/xstartup
           #!/bin/sh
           unset SESSION_MANAGER
@@ -60,8 +62,9 @@ jobs:
           EOF
           chmod +x ~/.vnc/xstartup
 
-          # 4. Start TigerVNC on port 5901 (display :1)
-          vncserver :1 -geometry 1366x768 -depth 24
+          # 4. Find server binary (vncserver or tigervncserver) and start display :1
+          VNC_CMD=$(command -v vncserver || command -v tigervncserver)
+          $VNC_CMD :1 -geometry 1366x768 -depth 24
 
           # 5. Start websockify HTML5 bridge on port 6080
           websockify --web /usr/share/novnc 6080 localhost:5901 &
