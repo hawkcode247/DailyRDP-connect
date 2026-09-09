@@ -1,507 +1,57 @@
-name: 🚀 Legal Glory 6H RDP • Direct SSH • Multi-Client Parallel
+name: Legal Glory Dev Box (6h)
 
 on:
   workflow_dispatch:
-    inputs:
-      session_duration_hours:
-        description: 'Session duration (hours, 1-6 max)'
-        required: false
-        default: '6'
-        type: string
-      max_parallel_clients:
-        description: 'Max simultaneous SSH connections'
-        required: false
-        default: '10'
-        type: string
-      enable_rdp:
-        description: 'Enable RDP GUI desktop'
-        required: false
-        default: 'true'
-        type: choice
-        options: ['true', 'false']
-      enable_vnc:
-        description: 'Enable VNC + noVNC browser'
-        required: false
-        default: 'true'
-        type: choice
-        options: ['true', 'false']
-      android_api_level:
-        description: 'Android emulator API level'
-        required: false
-        default: '36'
-        type: choice
-        options: ['30', '33', '34', '35', '36']
+
+concurrency:
+  group: devbox
+  cancel-in-progress: false
 
 jobs:
-  legal-glory-rdp:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    permissions:
-      contents: read
-    
+  devbox:
+    runs-on: ubuntu-latest        # KVM + Android SDK preinstalled
+    timeout-minutes: 355          # ~6h, under the 360 hard cap
     steps:
-      - name: ✅ Validate inputs & setup environment
+      - name: Show runner specs
         run: |
-          set -e
-          HOURS="${{ github.event.inputs.session_duration_hours || 6 }}"
-          if ! [[ "$HOURS" =~ ^[0-9]+$ ]] || (( HOURS < 1 || HOURS > 6 )); then
-            echo "❌ Duration must be 1-6 hours. Got: $HOURS"
-            exit 1
-          fi
-          MINUTES=$((HOURS * 60))
-          SECONDS=$((MINUTES * 60))
-          CLIENTS="${{ github.event.inputs.max_parallel_clients || 10 }}"
-          if ! [[ "$CLIENTS" =~ ^[0-9]+$ ]] || (( CLIENTS < 1 || CLIENTS > 50 )); then
-            echo "❌ Max clients must be 1-50. Got: $CLIENTS"
-            exit 1
-          fi
-          echo "SESSION_HOURS=$HOURS" >> $GITHUB_ENV
-          echo "SESSION_MINUTES=$MINUTES" >> $GITHUB_ENV
-          echo "SESSION_SECONDS=$SECONDS" >> $GITHUB_ENV
-          echo "MAX_CLIENTS=$CLIENTS" >> $GITHUB_ENV
-          echo "ANDROID_API=${{ github.event.inputs.android_api_level || 36 }}" >> $GITHUB_ENV
-          echo "ENABLE_RDP=${{ github.event.inputs.enable_rdp || true }}" >> $GITHUB_ENV
-          echo "ENABLE_VNC=${{ github.event.inputs.enable_vnc || true }}" >> $GITHUB_ENV
-          echo "SESSION_ID=$(date +%s)" >> $GITHUB_ENV
-          echo "SESSION_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
-          echo "✅ Validated: Duration=$HOURS hours, Clients=$CLIENTS"
+          echo "vCPU: $(nproc)  RAM: $(free -g | sed -n 2p)"
+          ls -la /dev/kvm || echo "NO KVM - emulator will be slow!"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          df -h /
 
-      - name: 📦 Maximize free disk space (~50-60 GB)
-        uses: jlumbroso/free-disk-space@main
+      - name: Join Tailscale
+        uses: tailscale/github-action@v3
         with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: false
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          version: latest
 
-      - name: 🚀 Configure high-performance kernel parameters
+      - name: Open firewall for tailnet traffic (SSH + RDP)
         run: |
-          set -e
-          sudo tee /etc/security/limits.d/99-legalglory.conf > /dev/null <<'EOF'
-          * soft nofile 65535
-          * hard nofile 65535
-          * soft nproc 65535
-          * hard nproc 65535
-          * soft memlock unlimited
-          * hard memlock unlimited
-          EOF
-          
-          sudo sysctl -w net.core.somaxconn=65535 > /dev/null 2>&1 || true
-          sudo sysctl -w net.ipv4.tcp_max_syn_backlog=65535 > /dev/null 2>&1 || true
-          sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535" > /dev/null 2>&1 || true
-          sudo sysctl -w net.ipv4.tcp_tw_reuse=1 > /dev/null 2>&1 || true
-          sudo sysctl -w net.ipv4.tcp_fin_timeout=30 > /dev/null 2>&1 || true
-          
-          echo "✅ Kernel & network optimized"
+          sudo ufw allow 22 || true
+          sudo ufw allow 3389 || true
+          sudo ufw --force enable || true
+          sudo systemctl start ssh
+          sudo systemctl enable ssh
 
-      - name: 🔐 Generate SSH keypair (NO REPO SECRETS REQUIRED)
+      - name: Announce identity
         run: |
-          set -e
-          mkdir -p ~/.ssh /tmp/ssh-session
-          chmod 700 ~/.ssh
-          
-          ssh-keygen -t ed25519 -f ~/.ssh/session_key -N "" -C "legalglory-$(date +%s)" > /dev/null 2>&1
-          
-          cp ~/.ssh/session_key /tmp/ssh-session/private_key
-          chmod 600 /tmp/ssh-session/private_key
-          
-          cp ~/.ssh/session_key.pub /tmp/ssh-session/public_key.txt
-          
-          cat ~/.ssh/session_key.pub >> ~/.ssh/authorized_keys
-          chmod 600 ~/.ssh/authorized_keys
-          
-          RDP_PASSWORD=$(openssl rand -base64 16 | tr -d "=+/" | cut -c1-16)
-          echo "$RDP_PASSWORD" > /tmp/ssh-session/rdp_password.txt
-          chmod 600 /tmp/ssh-session/rdp_password.txt
-          
-          echo "RDP_PASSWORD=$RDP_PASSWORD" >> $GITHUB_ENV
-          
-          echo "✅ Ephemeral SSH keypair generated"
-          ssh-keygen -l -f ~/.ssh/session_key.pub
+          echo "TAILSCALE IP:"
+          tailscale ip -4
+          echo "Runner user: $(whoami)"
+          echo "SSH READY - sandbox can connect now"
 
-      - name: 🔓 Harden SSH for direct public access (FIXED)
+      - name: Prepare desktop + RDP (for GUI viewing)
         run: |
-          set -e
-          
-          MAX_CLIENTS=${{ env.MAX_CLIENTS }}
-          echo "Configuring SSH server for $MAX_CLIENTS parallel clients..."
-          
-          # Backup original config (IMPORTANT!)
-          sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.original.bak
-          
-          # Create NEW clean SSH config (replace, not append)
-          sudo tee /etc/ssh/sshd_config > /dev/null <<'SSHCONFIG'
-          # Legal Glory SSH Configuration
-          Port 22
-          AddressFamily any
-          ListenAddress 0.0.0.0
-          ListenAddress ::
-          
-          PermitRootLogin no
-          StrictModes yes
-          MaxAuthTries 5
-          
-          PubkeyAuthentication yes
-          PasswordAuthentication no
-          PermitEmptyPasswords no
-          AuthorizedKeysFile	.ssh/authorized_keys .ssh/authorized_keys2
-          
-          MaxStartups 100:30:200
-          MaxSessions 100
-          
-          TCPKeepAlive yes
-          ClientAliveInterval 30
-          ClientAliveCountMax 720
-          ConnectTimeout 60
-          
-          AllowTcpForwarding yes
-          AllowAgentForwarding yes
-          AllowStreamLocalForwarding yes
-          PermitOpen any
-          
-          X11Forwarding yes
-          X11UseLocalhost no
-          
-          Compression yes
-          CompressionLevel 6
-          
-          SyslogFacility AUTH
-          LogLevel VERBOSE
-          
-          Protocol 2
-          SSHCONFIG
-          
-          # ✅ FIXED: Correct exit code capture
-          echo "Testing SSH configuration..."
-          if sudo sshd -t 2>&1 | tee /tmp/sshd-test.log; then
-            echo "✅ SSH config validation PASSED"
-          else
-            echo "❌ SSH config validation FAILED"
-            echo "Error output:"
-            cat /tmp/sshd-test.log
-            echo ""
-            echo "Restoring backup..."
-            sudo cp /etc/ssh/sshd_config.original.bak /etc/ssh/sshd_config
-            exit 1
-          fi
-          
-          # Restart SSH service
-          echo "Restarting SSH service..."
-          sudo systemctl enable ssh > /dev/null 2>&1
-          sudo systemctl restart ssh
-          
-          # Verify SSH is running
-          sleep 2
-          if sudo systemctl is-active --quiet ssh; then
-            echo "✅ SSH service is RUNNING"
-          else
-            echo "❌ SSH service FAILED to start"
-            sudo systemctl status ssh
-            sudo cp /etc/ssh/sshd_config.original.bak /etc/ssh/sshd_config
-            exit 1
-          fi
-          
-          # Show listening ports
-          echo "✅ SSH listening on:"
-          sudo ss -tlnp 2>/dev/null | grep sshd || echo "  Port 22 (confirmed)"
-
-      - name: 🖥️ Install & configure RDP desktop
-        if: ${{ env.ENABLE_RDP == 'true' }}
-        run: |
-          set -e
-          echo "Installing RDP server (XFCE4)..."
-          
-          sudo apt-get update -qq > /dev/null 2>&1 || true
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 xfce4-terminal xfce4-notifyd xfce4-power-manager \
-            xrdp xrdp-hcall xrdp-sesmanager dbus-x11 \
-            mesa-utils mesa-va-drivers libgl1-mesa-glx \
-            2>&1 | grep -E "Setting up|Unpacking" | tail -5 || true
-          
-          echo "runner:${{ env.RDP_PASSWORD }}" | sudo chpasswd
-          echo "startxfce4" > ~/.xsession && chmod 755 ~/.xsession
-          
-          sudo usermod -aG ssl-cert,audio,video runner 2>/dev/null || true
-          
-          sudo mkdir -p /etc/xrdp/sesman.ini.d
-          sudo tee /etc/xrdp/sesman.ini.d/legalglory.ini > /dev/null <<'XRDPCONFIG'
-          [Session]
-          SessionType=Xvnc
-          
-          [Xvnc]
-          param1=-bs
-          param2=-ac
-          param3=-nolisten
-          param4=tcp
-          XRDPCONFIG
-          
-          sudo systemctl enable xrdp > /dev/null 2>&1 || true
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xrdp xfce4 xfce4-terminal dbus-x11 >/dev/null
+          sudo adduser runner ssl-cert || true
+          sudo systemctl enable xrdp
           sudo systemctl restart xrdp
-          
-          echo "Waiting for RDP to initialize..."
-          for i in {1..20}; do
-            if sudo systemctl is-active --quiet xrdp; then
-              echo "✅ RDP ready on port 3389"
-              break
-            fi
-            sleep 1
+          echo "RDP up on 3389 (user: runner)"
+
+      - name: Keep box alive ~6 hours
+        run: |
+          while true; do
+            echo "keepalive $(date) - uptime ok, tmux-free box"
+            sleep 60
           done
-
-      - name: 📺 Install & configure VNC + noVNC
-        if: ${{ env.ENABLE_VNC == 'true' }}
-        run: |
-          set -e
-          echo "Installing VNC + noVNC..."
-          
-          sudo apt-get install -y tigervnc-standalone-server tigervnc-common novnc websockify 2>&1 | tail -2 || true
-          
-          mkdir -p ~/.vnc
-          echo "${{ env.RDP_PASSWORD }}" | vncpasswd -f > ~/.vnc/passwd
-          chmod 600 ~/.vnc/passwd
-          
-          cat > ~/.vnc/xstartup <<'VNCSTART'
-          #!/bin/bash
-          unset SESSION_MANAGER
-          unset DBUS_SESSION_BUS_ADDRESS
-          export DISPLAY=:1
-          export VNCDESKTOP="Legal Glory"
-          exec startxfce4
-          VNCSTART
-          chmod +x ~/.vnc/xstartup
-          
-          pkill -f "vncserver" || true
-          sleep 1
-          vncserver :1 -geometry 1920x1080 -depth 24 -dpi 96 -localhost no -noxstartup 2>&1 | head -3 || true
-          sleep 3
-          
-          nohup websockify --web=/usr/share/novnc 6080 localhost:5901 > /tmp/websockify.log 2>&1 &
-          echo "✅ VNC ready on :1 (5901) and noVNC on 6080"
-
-      - name: 🤖 Install complete Android SDK + tools
-        run: |
-          set -e
-          echo "Installing Android SDK with all development tools..."
-          
-          export ANDROID_HOME=$HOME/android-sdk
-          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
-          
-          mkdir -p $ANDROID_HOME/cmdline-tools ~/.android
-          
-          echo "Downloading Android SDK tools..."
-          TOOLS_ZIP="/tmp/android-tools.zip"
-          
-          for attempt in {1..3}; do
-            if curl -4 -sSL --connect-timeout 30 --max-time 120 \
-              -o "$TOOLS_ZIP" \
-              "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"; then
-              break
-            fi
-            echo "Retry $attempt/3..."
-            sleep 5
-          done
-          
-          unzip -q "$TOOLS_ZIP" -d /tmp/android-ct
-          mv /tmp/android-ct/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
-          
-          echo "Accepting licenses..."
-          yes 2>/dev/null | sdkmanager --sdk_root=$ANDROID_HOME --licenses > /dev/null 2>&1 || true
-          
-          echo "Installing packages (this may take a few minutes)..."
-          for PKG in "platform-tools" "platforms;android-30" "platforms;android-33" "platforms;android-34" "platforms;android-35" "platforms;android-36" "build-tools;30.0.3" "build-tools;33.0.1" "build-tools;34.0.0" "build-tools;35.0.0" "build-tools;36.0.0" "emulator" "system-images;android-30;google_apis;x86_64" "system-images;android-33;google_apis;x86_64" "system-images;android-34;google_apis;x86_64" "system-images;android-35;google_apis;x86_64" "system-images;android-36;google_apis;x86_64" "cmake;3.22.1" "ndk;26.0.10665150"; do
-            sdkmanager --sdk_root=$ANDROID_HOME "$PKG" 2>&1 | tail -1 || true
-          done
-          
-          mkdir -p ~/.android/avd
-          SYSTEM_IMAGE="system-images;android-${{ env.ANDROID_API }};google_apis;x86_64"
-          echo "no" | avdmanager create avd -n "LegalGlory_API${{ env.ANDROID_API }}" -k "$SYSTEM_IMAGE" -d "pixel_5" -c 2048M -force 2>&1 | tail -3 || true
-          
-          cat >> ~/.bashrc <<'BASHRC'
-          
-          export ANDROID_HOME=$HOME/android-sdk
-          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
-          export PATH=$ANDROID_HOME/platform-tools:$PATH
-          export PATH=$ANDROID_HOME/emulator:$PATH
-          BASHRC
-          
-          echo "✅ Android SDK complete"
-          adb --version
-
-      - name: 📊 Display system information
-        run: |
-          echo "═══════════════════════════════════════════════════════"
-          echo "SYSTEM INFORMATION"
-          echo "═══════════════════════════════════════════════════════"
-          echo "CPU Cores: $(nproc)"
-          echo "RAM: $(free -h | awk 'NR==2 {print $2}')"
-          echo "Disk: $(df -h / | awk 'NR==2 {print $4 " free"}')"
-          echo "IPv4: $(hostname -I | awk '{print $1}')"
-          echo ""
-          echo "SSH Status: $(systemctl is-active ssh 2>/dev/null || echo 'checking...')"
-          if [ "${{ env.ENABLE_RDP }}" = "true" ]; then
-            echo "RDP Status: $(systemctl is-active xrdp 2>/dev/null || echo 'checking...')"
-          fi
-          echo "═══════════════════════════════════════════════════════"
-
-      - name: 🎯 Generate session connection details
-        run: |
-          cat > /tmp/ssh-session/CONNECTION_GUIDE.txt <<'GUIDE'
-          🎯 LEGAL GLORY 6H RDP • MULTI-CLIENT SSH
-          ════════════════════════════════════════════════════════════
-          
-          📍 SERVICES AVAILABLE:
-             • SSH Server:    Port 22 (direct access)
-             • RDP Desktop:   Port 3389 (XFCE4 GUI)
-             • VNC Server:    Port 5901 (alternative)
-             • noVNC Browser: Port 6080 (web-based)
-          
-          🔑 CREDENTIALS:
-             • Username:      runner
-             • SSH Auth:      Ed25519 keypair (key-based)
-             • RDP Password:  See rdp_password.txt
-          
-          ════════════════════════════════════════════════════════════
-          📲 CONNECTION METHODS
-          ════════════════════════════════════════════════════════════
-          
-          1️⃣  DIRECT SSH (BEST)
-              ssh -i private_key -o ServerAliveInterval=30 \
-                  -o ServerAliveCountMax=720 runner@PUBLIC_IP
-          
-          2️⃣  RDP VIA SSH TUNNEL
-              ssh -i private_key -N -L 3389:localhost:3389 runner@PUBLIC_IP
-              # Then: xfreerdp /v:localhost:3389 /u:runner /p:PASSWORD
-          
-          3️⃣  VNC VIA SSH TUNNEL
-              ssh -i private_key -N -L 5901:localhost:5901 runner@PUBLIC_IP
-              # Then: vncviewer localhost:5901
-          
-          4️⃣  noVNC BROWSER (EASIEST)
-              ssh -i private_key -N -L 6080:localhost:6080 runner@PUBLIC_IP
-              # Then: http://localhost:6080/vnc.html
-          
-          5️⃣  MULTI-CLIENT PARALLEL
-              Terminal 1: ssh -i private_key runner@PUBLIC_IP
-              Terminal 2: ssh -i private_key -N -L 3389:localhost:3389 runner@PUBLIC_IP
-              Terminal 3: ssh -i private_key runner@PUBLIC_IP
-              
-              All work SIMULTANEOUSLY! 🚀
-          
-          ════════════════════════════════════════════════════════════
-          🛠️  PERSISTENT CONNECTION (NO DROPS)
-          ════════════════════════════════════════════════════════════
-          
-          ssh -i private_key \
-              -o ServerAliveInterval=30 \
-              -o ServerAliveCountMax=720 \
-              runner@PUBLIC_IP
-          
-          This keeps connection alive for 6 hours with:
-          • Keep-alive ping every 30 seconds
-          • 720 total attempts = 360 minutes = 6 hours
-          
-          ════════════════════════════════════════════════════════════
-          ⚡ QUICK TIPS
-          ════════════════════════════════════════════════════════════
-          
-          • If connection drops, just reconnect - desktop stays open!
-          • SSH key is Ed25519 (modern, secure, no passwords)
-          • Session auto-closes after 6 hours
-          • All credentials deleted after session ends
-          • Multiple clients can connect simultaneously
-          
-          GUIDE
-          
-          cat /tmp/ssh-session/CONNECTION_GUIDE.txt
-
-      - name: ⏱️ Keep session active for ${{ env.SESSION_HOURS }} hours
-        run: |
-          set -e
-          SESSION_SECONDS=${{ env.SESSION_SECONDS }}
-          SESSION_HOURS=${{ env.SESSION_HOURS }}
-          
-          cat <<'BANNER'
-          
-          ╔═════════════════════════════════════════════════════════════╗
-          ║                 🎉 SESSION ACTIVE 🎉                        ║
-          ║  ✅ SSH   • Port 22   • Direct Public Access               ║
-          ║  ✅ RDP   • Port 3389 • XFCE4 GUI (if enabled)             ║
-          ║  ✅ VNC   • Port 5901 • Alternative GUI (if enabled)       ║
-          ║  ✅ noVNC • Port 6080 • Browser Access (if enabled)        ║
-          ║  📱 Multi-Client • Up to 100 simultaneous connections     ║
-          ║  🤖 Android SDK ready with API 30-36                      ║
-          ║  ⏱️  Duration: $SESSION_HOURS hours                          ║
-          ║  🔐 No VPN • No Tailscale • Direct Connection              ║
-          ║  💪 Keep-alive: 30s interval, 720 retries = 6 hours        ║
-          ║                                                             ║
-          ║  DO NOT STOP THIS WORKFLOW!                                ║
-          ║  Session is running. Clients can reconnect seamlessly.     ║
-          ║                                                             ║
-          ╚═════════════════════════════════════════════════════════════╝
-          
-          BANNER
-          
-          echo ""
-          echo "📌 Session will be active for $SESSION_HOURS hour(s)"
-          echo "🕐 Started: $(date)"
-          echo ""
-          
-          START_TIME=$(date +%s)
-          END_TIME=$((START_TIME + SESSION_SECONDS))
-          LAST_REPORT=0
-          
-          while [ $(date +%s) -lt $END_TIME ]; do
-            ELAPSED=$(($(date +%s) - START_TIME))
-            REMAINING=$((SESSION_SECONDS - ELAPSED))
-            HOURS=$((REMAINING / 3600))
-            MINUTES=$(((REMAINING % 3600) / 60))
-            SECS=$((REMAINING % 60))
-            
-            # Report every 5 minutes
-            if [ $((ELAPSED - LAST_REPORT)) -ge 300 ]; then
-              echo "✅ $(date '+%Y-%m-%d %H:%M:%S') • Remaining: ${HOURS}h ${MINUTES}m ${SECS}s"
-              LAST_REPORT=$ELAPSED
-            fi
-            
-            # Health checks every minute
-            if [ $((ELAPSED % 60)) -lt 1 ]; then
-              sudo systemctl is-active --quiet ssh || sudo systemctl restart ssh 2>/dev/null || true
-              if [ "${{ env.ENABLE_RDP }}" = "true" ]; then
-                sudo systemctl is-active --quiet xrdp || sudo systemctl restart xrdp 2>/dev/null || true
-              fi
-            fi
-            
-            sleep 10
-          done
-          
-          echo ""
-          echo "✅ Session completed successfully"
-
-      - name: 📋 Display credentials & connection info
-        if: always()
-        run: |
-          echo ""
-          echo "════════════════════════════════════════════════════════"
-          echo "SSH PRIVATE KEY"
-          echo "════════════════════════════════════════════════════════"
-          cat /tmp/ssh-session/private_key
-          echo ""
-          echo "════════════════════════════════════════════════════════"
-          echo "RDP/VNC PASSWORD"
-          echo "════════════════════════════════════════════════════════"
-          cat /tmp/ssh-session/rdp_password.txt
-          echo ""
-          echo "════════════════════════════════════════════════════════"
-          echo "CONNECTION GUIDE"
-          echo "════════════════════════════════════════════════════════"
-          cat /tmp/ssh-session/CONNECTION_GUIDE.txt
-
-      - name: 🧹 Cleanup (after session expires)
-        if: always()
-        run: |
-          echo "🧹 Cleaning up session credentials..."
-          shred -vfz -n 10 /tmp/ssh-session/* 2>/dev/null || rm -f /tmp/ssh-session/*
-          rm -rf /tmp/ssh-session 2>/dev/null || true
-          echo "✅ Session files securely deleted"
