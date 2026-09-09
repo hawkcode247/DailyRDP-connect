@@ -1,13 +1,57 @@
-      - name: Generate Random Password & Start VNC
+name: Ubuntu Web Desktop (noVNC + Cloudflare)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # GitHub maximum runtime: 6 hours
+
+    steps:
+      - name: Free Maximum Storage (~40GB+)
+        run: |
+          echo "Cleaning pre-installed developer tools to free space..."
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          echo "Available disk space:"
+          df -h /
+
+      - name: Install Desktop (XFCE4) & VNC Components
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            xfce4 \
+            xfce4-terminal \
+            tigervnc-standalone-server \
+            tigervnc-common \
+            novnc \
+            websockify \
+            curl \
+            wget \
+            openssl
+
+      - name: Install Cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          rm -f cloudflared-linux-amd64.deb
+
+      - name: Configure Desktop & Start VNC Server
         id: vnc_setup
         run: |
-          # Generate 10-character password (without GitHub masking so you can read it)
+          # 1. Generate a random 10-character password
           AUTO_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 10)
-          
+
+          # 2. Configure VNC password
           mkdir -p ~/.vnc
           echo "$AUTO_PASS" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
 
+          # 3. Configure XFCE session startup script
           cat << 'EOF' > ~/.vnc/xstartup
           #!/bin/sh
           unset SESSION_MANAGER
@@ -16,35 +60,38 @@
           EOF
           chmod +x ~/.vnc/xstartup
 
-          # Start TigerVNC & noVNC
+          # 4. Start TigerVNC on port 5901 (display :1)
           vncserver :1 -geometry 1366x768 -depth 24
+
+          # 5. Start websockify HTML5 bridge on port 6080
           websockify --web /usr/share/novnc 6080 localhost:5901 &
 
+          # Export password to subsequent steps
           echo "PASS=$AUTO_PASS" >> "$GITHUB_OUTPUT"
 
-      - name: Launch Tunnel & Print Link
+      - name: Start Cloudflare Tunnel & Generate Access Link
         run: |
-          # Start cloudflared using its built-in --logfile flag
+          # Launch Cloudflare Quick Tunnel with dedicated logfile
           cloudflared tunnel --url http://localhost:6080 --logfile cloudflared.log &
 
-          echo "Waiting for Cloudflare Tunnel to allocate URL..."
+          echo "Waiting for Cloudflare Tunnel to initialize and allocate URL..."
           TUNNEL_URL=""
-          
-          # Poll every second for up to 35 seconds
+
+          # Poll cloudflared.log for up to 35 seconds
           for i in {1..35}; do
             if [ -f cloudflared.log ]; then
               TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' cloudflared.log | head -n 1)
               if [ -n "$TUNNEL_URL" ]; then
-                echo "Tunnel established after ${i}s!"
+                echo "Tunnel established after ${i} seconds!"
                 break
               fi
             fi
             sleep 1
           done
 
-          # If the tunnel failed to allocate within 35s, dump the log to show the exact error
+          # If the URL was not found, print log contents for debugging
           if [ -z "$TUNNEL_URL" ]; then
-            echo "ERROR: Cloudflare tunnel timed out. Log output:"
+            echo "ERROR: Cloudflare tunnel timed out. Log output below:"
             cat cloudflared.log
             exit 1
           fi
@@ -52,16 +99,25 @@
           AUTO_PASS="${{ steps.vnc_setup.outputs.PASS }}"
           AUTOLOGIN_LINK="${TUNNEL_URL}/vnc.html?autoconnect=true&password=${AUTO_PASS}"
 
-          # 1. Print directly into GitHub console logs
+          # Print to the workflow console log
           echo "================================================================================"
           echo "  ONE-CLICK DESKTOP: $AUTOLOGIN_LINK"
-          echo "  WEB URL:          $TUNNEL_URL/vnc.html"
+          echo "  DIRECT WEB URL:   $TUNNEL_URL/vnc.html"
           echo "  PASSWORD:         $AUTO_PASS"
           echo "================================================================================"
 
-          # 2. Render as clickable markdown on the GitHub Actions Summary tab
+          # Print to GitHub Actions Job Summary UI
           echo "### 🚀 Ubuntu Desktop Online" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **One-Click Auto-Login**: [Open Web Desktop](${AUTOLOGIN_LINK})" >> $GITHUB_STEP_SUMMARY
-          echo "- **Manual URL**: \`${TUNNEL_URL}/vnc.html\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Direct URL**: \`${TUNNEL_URL}/vnc.html\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Password**: \`${AUTO_PASS}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Max Time**: 6 hours" >> $GITHUB_STEP_SUMMARY
+
+      - name: Keep Runner Alive
+        run: |
+          echo "Desktop running. Keeping runner alive for up to 350 minutes..."
+          for i in {1..350}; do
+            echo "Session active: minute $i of 350..."
+            sleep 60
+          done
