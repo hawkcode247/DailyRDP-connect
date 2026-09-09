@@ -84,8 +84,8 @@ jobs:
           VNC_CMD=$(command -v vncserver || command -v tigervncserver)
           $VNC_CMD :1
 
-          # 7. Start HTML5 websockify bridge with keepalive heartbeat
-          websockify --web /usr/share/novnc --heartbeat 30 6080 localhost:5901 &
+          # 7. Start HTML5 websockify bridge (WITHOUT --heartbeat so Cloudflare proxy doesn't drop it)
+          websockify --web /usr/share/novnc 6080 localhost:5901 &
 
           echo "PASS=$AUTO_PASS" >> "$GITHUB_OUTPUT"
 
@@ -170,7 +170,6 @@ jobs:
           SSH_CMD="${{ steps.ssh_setup.outputs.SSH_CMD }}"
           WEB_SHELL="${{ steps.ssh_setup.outputs.WEB_SHELL }}"
 
-          # Print to console log
           echo "================================================================================"
           echo "  ONE-CLICK DESKTOP: $AUTOLOGIN_LINK"
           echo "  MANUAL WEB URL:   $TUNNEL_URL/vnc.html"
@@ -178,7 +177,6 @@ jobs:
           echo "  SSH COMMAND:      $SSH_CMD"
           echo "================================================================================"
 
-          # Render formatted summary card
           echo "## 🚀 Remote Ubuntu Runner Online" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 🖥️ Web GUI Desktop (Multi-Client Enabled)" >> $GITHUB_STEP_SUMMARY
