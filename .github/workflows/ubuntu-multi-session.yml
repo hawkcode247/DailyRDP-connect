@@ -6,26 +6,27 @@ on:
 jobs:
   multi-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # Maximum allowed by GitHub (6 hours)
+    timeout-minutes: 360 # GitHub runner hard maximum: 6 hours
 
     steps:
       - name: Free Maximum Disk Space (~45GB)
         run: |
-          echo "Clearing unused packages..."
+          echo "Clearing unused toolchains to reclaim disk space..."
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
           sudo apt-get clean
-          echo "Disk space freed:"
+          echo "Available storage:"
           df -h /
 
-      - name: Install Desktop, VNC, and SSH Tools
+      - name: Install Desktop, VNC, DBus, and SSH Tools
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             xfce4 \
             xfce4-terminal \
+            dbus-x11 \
             tigervnc-standalone-server \
             tigervnc-tools \
             tigervnc-common \
@@ -38,17 +39,17 @@ jobs:
 
       - name: Install Cloudflared Tunnel
         run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
-          rm -f cloudflared-linux-amd64.deb
+          curl -fsSL --retry 3 https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o cloudflared.deb
+          sudo dpkg -i cloudflared.deb
+          rm -f cloudflared.deb
 
-      - name: Setup Multi-User VNC Desktop & Auto Password
+      - name: Configure Multi-User Desktop & Auto-Generate Password
         id: setup_desktop
         run: |
-          # 1. Generate random 10-character password
+          # 1. Generate 10-character alphanumeric password
           AUTO_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 10)
 
-          # 2. Sync password with 'runner' system account
+          # 2. Sync password with 'runner' system account (for sudo authentication)
           echo "runner:$AUTO_PASS" | sudo chpasswd
 
           # 3. Configure VNC password
@@ -56,25 +57,29 @@ jobs:
           echo "$AUTO_PASS" | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || printf "$AUTO_PASS\n$AUTO_PASS\nn\n" | vncpasswd
           chmod 600 ~/.vnc/passwd
 
-          # 4. Configure TigerVNC for native multi-client sharing via config file
+          # 4. Strict TigerVNC multi-session config file (replaces -shared flag)
           cat << 'EOF' > ~/.vnc/config
+          session=xfce
           geometry=1366x768
           depth=24
-          securitytypes=vncauth
+          SecurityTypes=VncAuth
           AlwaysShared=1
           NeverShared=0
           EOF
 
-          # 5. Create XFCE session startup script
+          # 5. Session startup script with DBus support
           cat << 'EOF' > ~/.vnc/xstartup
           #!/bin/sh
           unset SESSION_MANAGER
           unset DBUS_SESSION_BUS_ADDRESS
-          exec startxfce4
+          [ -x /etc/vnc/xstartup ] && exec /etc/vnc/xstartup
+          [ -r $HOME/.Xresources ] && xrdb $HOME/.Xresources
+          exec dbus-launch --exit-with-session startxfce4
           EOF
           chmod +x ~/.vnc/xstartup
 
-          # 6. Start TigerVNC server cleanly on display :1
+          # 6. Clean any existing locks and launch VNC on display :1
+          sudo rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 || true
           VNC_CMD=$(command -v vncserver || command -v tigervncserver)
           $VNC_CMD :1
 
@@ -92,12 +97,12 @@ jobs:
           echo "Waiting for Cloudflare Tunnel to initialize..."
           TUNNEL_URL=""
 
-          # Poll for up to 40 seconds to obtain tunnel URL
+          # Poll for up to 40 seconds to retrieve tunnel URL
           for i in {1..40}; do
             if [ -f cloudflared.log ]; then
               TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' cloudflared.log | head -n 1)
               if [ -n "$TUNNEL_URL" ]; then
-                echo "Tunnel ready after ${i} seconds."
+                echo "Tunnel established in ${i} seconds."
                 break
               fi
             fi
@@ -105,7 +110,7 @@ jobs:
           done
 
           if [ -z "$TUNNEL_URL" ]; then
-            echo "ERROR: Cloudflare tunnel timed out. Log output:"
+            echo "ERROR: Cloudflare tunnel allocation failed. Log output:"
             cat cloudflared.log
             exit 1
           fi
@@ -115,13 +120,33 @@ jobs:
       - name: Start SSH Terminal (tmate Multi-User)
         id: tmate_setup
         run: |
-          # Start tmate in background with mouse support enabled
+          # 1. Pre-generate SSH key non-interactively so tmate does not hang
+          mkdir -p ~/.ssh
+          [ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" -q
+
+          # 2. Launch tmate session in background
           tmate -S /tmp/tmate.sock new-session -d -s main
           tmate -S /tmp/tmate.sock set-option -g mouse on
-          tmate -S /tmp/tmate.sock wait tmate-ready
 
-          SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          WEB_SHELL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
+          # 3. Active polling loop (avoids the deadlock in 'wait tmate-ready')
+          echo "Connecting to tmate servers..."
+          SSH_CMD=""
+          for i in {1..30}; do
+            SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || true)
+            if [ -n "$SSH_CMD" ]; then
+              echo "tmate connection established in ${i}s!"
+              break
+            fi
+            sleep 1
+          done
+
+          if [ -z "$SSH_CMD" ]; then
+            echo "Warning: tmate server timed out. Check tmate.io status."
+            SSH_CMD="Unavailable"
+            WEB_SHELL="Unavailable"
+          else
+            WEB_SHELL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || true)
+          fi
 
           echo "SSH=$SSH_CMD" >> "$GITHUB_OUTPUT"
           echo "WEB_SHELL=$WEB_SHELL" >> "$GITHUB_OUTPUT"
@@ -130,7 +155,7 @@ jobs:
         run: |
           AUTO_PASS="${{ steps.setup_desktop.outputs.PASS }}"
           TUNNEL_URL="${{ steps.tunnel.outputs.URL }}"
-          AUTOLOGIN_LINK="${TUNNEL_URL}/vnc.html?autoconnect=true&password=${AUTO_PASS}"
+          AUTOLOGIN_LINK="${TUNNEL_URL}/vnc.html?autoconnect=true&resize=remote&password=${AUTO_PASS}"
           SSH_CMD="${{ steps.tmate_setup.outputs.SSH }}"
           WEB_SHELL="${{ steps.tmate_setup.outputs.WEB_SHELL }}"
 
@@ -143,7 +168,7 @@ jobs:
           echo "  WEB TERMINAL:     $WEB_SHELL"
           echo "================================================================================"
 
-          # Render in GitHub Actions Workflow Summary UI
+          # Render formatted card in GitHub Actions Job Summary UI
           echo "## 🚀 Remote Ubuntu Runner Online" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 🖥️ Web GUI Desktop (Multi-Client Enabled)" >> $GITHUB_STEP_SUMMARY
@@ -154,10 +179,10 @@ jobs:
           echo "### 💻 Full Root SSH Access" >> $GITHUB_STEP_SUMMARY
           echo "- ⚡ **SSH Command**: \`$SSH_CMD\`" >> $GITHUB_STEP_SUMMARY
           echo "- 🌐 **Browser Shell**: [Open Web Terminal](${WEB_SHELL})" >> $GITHUB_STEP_SUMMARY
-          echo "- 🛡️ **Sudo**: Run \`sudo -i\` (no password required)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🛡️ **Root Shell**: Run \`sudo -i\` inside terminal" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "*Session will stay active up to 6 hours.*" >> $GITHUB_STEP_SUMMARY
+          echo "*Session active for up to 6 hours.*" >> $GITHUB_STEP_SUMMARY
 
       - name: Keep-Alive Loop
         run: |
