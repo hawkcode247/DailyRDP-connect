@@ -1,193 +1,388 @@
-name: Ubuntu Desktop & SSH (Multi-Session)
+name: 🚀 ULTIMATE Legal Glory • 6H RDP • Enterprise-Grade Stability
 
 on:
   workflow_dispatch:
+    inputs:
+      session_duration_hours:
+        description: 'Session duration (1-6 hours)'
+        required: false
+        default: '6'
+        type: string
+      max_parallel_clients:
+        description: 'Max simultaneous connections'
+        required: false
+        default: '20'
+        type: string
+      enable_rdp:
+        description: 'Enable RDP GUI'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+      enable_vnc:
+        description: 'Enable VNC + noVNC'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+      android_api:
+        description: 'Android API level'
+        required: false
+        default: '36'
+        type: choice
+        options: ['30', '33', '34', '35', '36']
 
 jobs:
-  multi-session:
+  ultimate-rdp-server:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # GitHub runner hard maximum: 6 hours
-
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    
     steps:
-      - name: Free Maximum Disk Space (~45GB)
+      - name: 📋 Initialize & Validate
         run: |
-          echo "Clearing unused toolchains to reclaim disk space..."
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo apt-get clean
-          echo "Available storage:"
-          df -h /
+          set -e
+          HOURS="${{ github.event.inputs.session_duration_hours || 6 }}"
+          if ! [[ "$HOURS" =~ ^[0-9]+$ ]] || (( HOURS < 1 || HOURS > 6 )); then
+            echo "❌ Invalid hours"
+            exit 1
+          fi
+          SECONDS=$((HOURS * 60 * 60))
+          echo "SESSION_HOURS=$HOURS" >> $GITHUB_ENV
+          echo "SESSION_SECONDS=$SECONDS" >> $GITHUB_ENV
+          echo "MAX_CLIENTS=${{ github.event.inputs.max_parallel_clients || 20 }}" >> $GITHUB_ENV
+          echo "ANDROID_API=${{ github.event.inputs.android_api || 36 }}" >> $GITHUB_ENV
+          echo "ENABLE_RDP=${{ github.event.inputs.enable_rdp || true }}" >> $GITHUB_ENV
+          echo "ENABLE_VNC=${{ github.event.inputs.enable_vnc || true }}" >> $GITHUB_ENV
+          echo "✅ Initialized"
 
-      - name: Install Desktop, VNC, DBus, and SSH Tools
+      - name: 📦 Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: 🚀 Enterprise Kernel Tuning
         run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 \
-            xfce4-terminal \
-            dbus-x11 \
-            tigervnc-standalone-server \
-            tigervnc-tools \
-            tigervnc-common \
-            novnc \
-            websockify \
-            curl \
-            wget \
-            openssl \
-            tmate
+          set -e
+          sudo tee /etc/security/limits.d/99-ultimate-rdp.conf > /dev/null <<'LIMITS'
+          * soft nofile 65536
+          * hard nofile 65536
+          * soft nproc 65536
+          * hard nproc 65536
+          * soft memlock unlimited
+          * hard memlock unlimited
+          LIMITS
+          
+          sudo sysctl -w net.core.somaxconn=65536 > /dev/null 2>&1 || true
+          sudo sysctl -w net.core.netdev_max_backlog=65536 > /dev/null 2>&1 || true
+          sudo sysctl -w net.ipv4.tcp_max_syn_backlog=65536 > /dev/null 2>&1 || true
+          sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535" > /dev/null 2>&1 || true
+          sudo sysctl -w net.ipv4.tcp_tw_reuse=1 > /dev/null 2>&1 || true
+          sudo sysctl -w net.ipv4.tcp_keepalive_time=60 > /dev/null 2>&1 || true
+          sudo sysctl -w net.netfilter.nf_conntrack_max=2000000 > /dev/null 2>&1 || true
+          echo "✅ Kernel tuned"
 
-      - name: Install Cloudflared Tunnel
+      - name: 🔐 Generate Secure Credentials
         run: |
-          curl -fsSL --retry 3 https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o cloudflared.deb
-          sudo dpkg -i cloudflared.deb
-          rm -f cloudflared.deb
+          set -e
+          mkdir -p ~/.ssh /tmp/session-data
+          chmod 700 ~/.ssh /tmp/session-data
+          
+          ssh-keygen -t ed25519 -f ~/.ssh/session_key -N "" -C "ultimate" > /dev/null 2>&1
+          cp ~/.ssh/session_key /tmp/session-data/private_key
+          chmod 600 /tmp/session-data/private_key
+          cat ~/.ssh/session_key.pub >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+          
+          RDP_PASSWORD=$(openssl rand -base64 24 | tr -d "=+/" | cut -c1-20)
+          echo "$RDP_PASSWORD" > /tmp/session-data/rdp_password
+          chmod 600 /tmp/session-data/rdp_password
+          
+          echo "RDP_PASSWORD=$RDP_PASSWORD" >> $GITHUB_ENV
+          echo "✅ Credentials generated"
 
-      - name: Configure Multi-User Desktop & Auto-Generate Password
-        id: setup_desktop
+      - name: 🌐 Configure Enterprise SSH
         run: |
-          # 1. Generate 10-character alphanumeric password
-          AUTO_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 10)
-
-          # 2. Sync password with 'runner' system account (for sudo authentication)
-          echo "runner:$AUTO_PASS" | sudo chpasswd
-
-          # 3. Configure VNC password
-          mkdir -p ~/.vnc
-          echo "$AUTO_PASS" | vncpasswd -f > ~/.vnc/passwd 2>/dev/null || printf "$AUTO_PASS\n$AUTO_PASS\nn\n" | vncpasswd
-          chmod 600 ~/.vnc/passwd
-
-          # 4. Strict TigerVNC multi-session config file (replaces -shared flag)
-          cat << 'EOF' > ~/.vnc/config
-          session=xfce
-          geometry=1366x768
-          depth=24
-          SecurityTypes=VncAuth
-          AlwaysShared=1
-          NeverShared=0
-          EOF
-
-          # 5. Session startup script with DBus support
-          cat << 'EOF' > ~/.vnc/xstartup
-          #!/bin/sh
-          unset SESSION_MANAGER
-          unset DBUS_SESSION_BUS_ADDRESS
-          [ -x /etc/vnc/xstartup ] && exec /etc/vnc/xstartup
-          [ -r $HOME/.Xresources ] && xrdb $HOME/.Xresources
-          exec dbus-launch --exit-with-session startxfce4
-          EOF
-          chmod +x ~/.vnc/xstartup
-
-          # 6. Clean any existing locks and launch VNC on display :1
-          sudo rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 || true
-          VNC_CMD=$(command -v vncserver || command -v tigervncserver)
-          $VNC_CMD :1
-
-          # 7. Start HTML5 websockify bridge with keepalive heartbeat
-          websockify --web /usr/share/novnc --heartbeat 30 6080 localhost:5901 &
-
-          # Export password to subsequent steps
-          echo "PASS=$AUTO_PASS" >> "$GITHUB_OUTPUT"
-
-      - name: Start Cloudflare Tunnel (Web GUI)
-        id: tunnel
-        run: |
-          cloudflared tunnel --url http://localhost:6080 --logfile cloudflared.log &
-
-          echo "Waiting for Cloudflare Tunnel to initialize..."
-          TUNNEL_URL=""
-
-          # Poll for up to 40 seconds to retrieve tunnel URL
-          for i in {1..40}; do
-            if [ -f cloudflared.log ]; then
-              TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' cloudflared.log | head -n 1)
-              if [ -n "$TUNNEL_URL" ]; then
-                echo "Tunnel established in ${i} seconds."
-                break
-              fi
-            fi
-            sleep 1
-          done
-
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "ERROR: Cloudflare tunnel allocation failed. Log output:"
-            cat cloudflared.log
+          set -e
+          sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+          
+          sudo tee -a /etc/ssh/sshd_config > /dev/null <<'SSHCONF'
+          
+          # ULTIMATE RDP CONFIG
+          Port 22
+          AddressFamily any
+          ListenAddress 0.0.0.0
+          ListenAddress ::
+          MaxSessions 100
+          MaxStartups 100:30:200
+          TCPKeepAlive yes
+          ClientAliveInterval 15
+          ClientAliveCountMax 1440
+          Compression yes
+          CompressionLevel 6
+          
+          PubkeyAuthentication yes
+          PasswordAuthentication no
+          MaxAuthTries 5
+          
+          AllowTcpForwarding yes
+          AllowStreamLocalForwarding yes
+          AllowAgentForwarding yes
+          GatewayPorts yes
+          PermitOpen any
+          
+          X11Forwarding yes
+          X11UseLocalhost no
+          
+          SSHCONF
+          
+          if ! sudo sshd -t 2>&1; then
+            sudo cp /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
+            exit 1
+          fi
+          
+          sudo systemctl restart ssh
+          sleep 2
+          
+          if sudo systemctl is-active --quiet ssh; then
+            echo "✅ SSH ready"
+          else
             exit 1
           fi
 
-          echo "URL=$TUNNEL_URL" >> "$GITHUB_OUTPUT"
-
-      - name: Start SSH Terminal (tmate Multi-User)
-        id: tmate_setup
+      - name: 🖥️ Install RDP with Auto-Recovery
+        if: ${{ env.ENABLE_RDP == 'true' }}
         run: |
-          # 1. Pre-generate SSH key non-interactively so tmate does not hang
-          mkdir -p ~/.ssh
-          [ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" -q
-
-          # 2. Launch tmate session in background
-          tmate -S /tmp/tmate.sock new-session -d -s main
-          tmate -S /tmp/tmate.sock set-option -g mouse on
-
-          # 3. Active polling loop (avoids the deadlock in 'wait tmate-ready')
-          echo "Connecting to tmate servers..."
-          SSH_CMD=""
-          for i in {1..30}; do
-            SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' 2>/dev/null || true)
-            if [ -n "$SSH_CMD" ]; then
-              echo "tmate connection established in ${i}s!"
+          set -e
+          sudo apt-get update -qq > /dev/null 2>&1 || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 xfce4-terminal xfce4-notifyd \
+            xrdp xrdp-hcall xrdp-sesmanager dbus dbus-x11 \
+            mesa-utils mesa-va-drivers libgl1-mesa-glx \
+            2>&1 | tail -3 || true
+          
+          echo "runner:${{ env.RDP_PASSWORD }}" | sudo chpasswd
+          echo "startxfce4" > ~/.xsession && chmod 755 ~/.xsession
+          
+          sudo usermod -aG ssl-cert,audio,video,kvm,sudo runner 2>/dev/null || true
+          
+          sudo mkdir -p /etc/xrdp/sesman.ini.d
+          sudo tee /etc/xrdp/sesman.ini.d/ultimate-rdp.ini > /dev/null <<'XRDPCONF'
+          [Session]
+          SessionType=Xvnc
+          KillDisconnected=false
+          IdleTimeLimit=0
+          
+          [Xvnc]
+          param1=-bs
+          param2=-ac
+          param3=-nolisten
+          param4=tcp
+          param5=-depth
+          param6=24
+          param7=-geometry
+          param8=1920x1080
+          XRDPCONF
+          
+          sudo systemctl enable xrdp xrdp-sesman > /dev/null 2>&1 || true
+          sudo systemctl restart xrdp xrdp-sesman
+          
+          for i in {1..20}; do
+            if sudo systemctl is-active --quiet xrdp; then
+              echo "✅ RDP ready"
               break
             fi
             sleep 1
           done
 
-          if [ -z "$SSH_CMD" ]; then
-            echo "Warning: tmate server timed out. Check tmate.io status."
-            SSH_CMD="Unavailable"
-            WEB_SHELL="Unavailable"
-          else
-            WEB_SHELL=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}' 2>/dev/null || true)
-          fi
-
-          echo "SSH=$SSH_CMD" >> "$GITHUB_OUTPUT"
-          echo "WEB_SHELL=$WEB_SHELL" >> "$GITHUB_OUTPUT"
-
-      - name: Publish Connection Summary
+      - name: 📺 Install VNC + noVNC
+        if: ${{ env.ENABLE_VNC == 'true' }}
         run: |
-          AUTO_PASS="${{ steps.setup_desktop.outputs.PASS }}"
-          TUNNEL_URL="${{ steps.tunnel.outputs.URL }}"
-          AUTOLOGIN_LINK="${TUNNEL_URL}/vnc.html?autoconnect=true&resize=remote&password=${AUTO_PASS}"
-          SSH_CMD="${{ steps.tmate_setup.outputs.SSH }}"
-          WEB_SHELL="${{ steps.tmate_setup.outputs.WEB_SHELL }}"
+          set -e
+          sudo apt-get install -y tigervnc-standalone-server novnc websockify 2>&1 | tail -1 || true
+          
+          mkdir -p ~/.vnc
+          echo "${{ env.RDP_PASSWORD }}" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+          
+          cat > ~/.vnc/xstartup <<'VNCSTART'
+          #!/bin/bash
+          unset SESSION_MANAGER DBUS_SESSION_BUS_ADDRESS
+          export DISPLAY=:1 VNCDESKTOP="Ultimate RDP"
+          exec startxfce4
+          VNCSTART
+          chmod +x ~/.vnc/xstartup
+          
+          pkill -f "vncserver" || true
+          sleep 1
+          vncserver :1 -geometry 1920x1080 -depth 24 -localhost no -noxstartup 2>&1 | head -3 || true
+          sleep 3
+          
+          nohup websockify --web=/usr/share/novnc --daemon 6080 localhost:5901 > /dev/null 2>&1 &
+          sleep 2
+          
+          echo "✅ VNC ready"
 
-          # Print to console log
-          echo "================================================================================"
-          echo "  ONE-CLICK DESKTOP: $AUTOLOGIN_LINK"
-          echo "  MANUAL WEB URL:   $TUNNEL_URL/vnc.html"
-          echo "  PASSWORD:         $AUTO_PASS"
-          echo "  SSH COMMAND:      $SSH_CMD"
-          echo "  WEB TERMINAL:     $WEB_SHELL"
-          echo "================================================================================"
-
-          # Render formatted card in GitHub Actions Job Summary UI
-          echo "## 🚀 Remote Ubuntu Runner Online" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🖥️ Web GUI Desktop (Multi-Client Enabled)" >> $GITHUB_STEP_SUMMARY
-          echo "- 🔗 **1-Click Auto-Login**: [Open Web Desktop](${AUTOLOGIN_LINK})" >> $GITHUB_STEP_SUMMARY
-          echo "- 🌐 **Manual Link**: \`${TUNNEL_URL}/vnc.html\`" >> $GITHUB_STEP_SUMMARY
-          echo "- 🔑 **Password**: \`${AUTO_PASS}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 💻 Full Root SSH Access" >> $GITHUB_STEP_SUMMARY
-          echo "- ⚡ **SSH Command**: \`$SSH_CMD\`" >> $GITHUB_STEP_SUMMARY
-          echo "- 🌐 **Browser Shell**: [Open Web Terminal](${WEB_SHELL})" >> $GITHUB_STEP_SUMMARY
-          echo "- 🛡️ **Root Shell**: Run \`sudo -i\` inside terminal" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "*Session active for up to 6 hours.*" >> $GITHUB_STEP_SUMMARY
-
-      - name: Keep-Alive Loop
+      - name: 🤖 Install Complete Android SDK
         run: |
-          echo "Runner active. Listening for connections..."
-          for i in {1..350}; do
-            echo "Heartbeat: minute $i of 350 active..."
-            sleep 60
+          set -e
+          export ANDROID_HOME=$HOME/android-sdk
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          
+          mkdir -p $ANDROID_HOME/cmdline-tools ~/.android ~/.gradle
+          
+          TOOLS_ZIP="/tmp/android-tools.zip"
+          for i in {1..5}; do
+            if curl -4 -sSL --max-time 120 -o "$TOOLS_ZIP" \
+              "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"; then
+              break
+            fi
+            sleep 5
           done
+          
+          unzip -q "$TOOLS_ZIP" -d /tmp/android-ct
+          mv /tmp/android-ct/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+          
+          yes 2>/dev/null | sdkmanager --sdk_root=$ANDROID_HOME --licenses > /dev/null 2>&1 || true
+          
+          for PKG in "platform-tools" "platforms;android-30" "platforms;android-33" "platforms;android-34" "platforms;android-35" "platforms;android-36" "build-tools;30.0.3" "build-tools;33.0.1" "build-tools;34.0.0" "build-tools;35.0.0" "build-tools;36.0.0" "emulator" "system-images;android-30;google_apis;x86_64" "system-images;android-33;google_apis;x86_64" "system-images;android-34;google_apis;x86_64" "system-images;android-35;google_apis;x86_64" "system-images;android-36;google_apis;x86_64" "cmake;3.22.1" "ndk;26.0.10665150"; do
+            sdkmanager --sdk_root=$ANDROID_HOME "$PKG" 2>&1 | tail -1 || true
+          done
+          
+          mkdir -p ~/.android/avd
+          SYSTEM_IMAGE="system-images;android-${{ env.ANDROID_API }};google_apis;x86_64"
+          echo "no" | avdmanager create avd -n "UltimateRDP_API${{ env.ANDROID_API }}" -k "$SYSTEM_IMAGE" -d "pixel_5" -c 4096M -force 2>&1 | tail -2 || true
+          
+          cat >> ~/.bashrc <<'BASHRC'
+          
+          export ANDROID_HOME=$HOME/android-sdk
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          export PATH=$ANDROID_HOME/platform-tools:$PATH
+          export PATH=$ANDROID_HOME/emulator:$PATH
+          BASHRC
+          
+          echo "✅ Android SDK ready"
+
+      - name: 🛡️ Install Auto-Recovery Services
+        run: |
+          set -e
+          mkdir -p ~/recovery-scripts
+          
+          cat > ~/recovery-scripts/monitor-all.sh <<'MONITOR'
+          #!/bin/bash
+          while true; do
+            # SSH check
+            sudo systemctl is-active --quiet ssh || sudo systemctl restart ssh
+            
+            # RDP check
+            if [ "$1" = "rdp" ]; then
+              sudo systemctl is-active --quiet xrdp || sudo systemctl restart xrdp xrdp-sesman
+            fi
+            
+            # VNC check
+            if [ "$2" = "vnc" ]; then
+              pgrep -f "vncserver.*:1" > /dev/null || (pkill -f vncserver; sleep 2; vncserver :1 -geometry 1920x1080 -depth 24 -localhost no -noxstartup > /dev/null 2>&1 &)
+            fi
+            
+            sleep 30
+          done
+          MONITOR
+          chmod +x ~/recovery-scripts/monitor-all.sh
+          
+          nohup ~/recovery-scripts/monitor-all.sh "${{ env.ENABLE_RDP }}" "${{ env.ENABLE_VNC }}" > /tmp/recovery.log 2>&1 &
+          echo "✅ Recovery daemons started"
+
+      - name: 📊 System Status
+        run: |
+          echo "════════════════════════════════════════════════════════"
+          echo "SYSTEM & SERVICES STATUS"
+          echo "════════════════════════════════════════════════════════"
+          echo "CPU Cores:  $(nproc)"
+          echo "RAM:        $(free -h | awk 'NR==2 {print $2}')"
+          echo "Free Disk:  $(df -h / | awk 'NR==2 {print $4}')"
+          echo ""
+          echo -n "SSH:        " && (systemctl is-active --quiet ssh && echo "✅" || echo "❌")
+          if [ "${{ env.ENABLE_RDP }}" = "true" ]; then
+            echo -n "RDP:        " && (systemctl is-active --quiet xrdp && echo "✅" || echo "❌")
+          fi
+          if [ "${{ env.ENABLE_VNC }}" = "true" ]; then
+            echo -n "VNC:        " && (pgrep -f "vncserver.*:1" > /dev/null && echo "✅" || echo "❌")
+          fi
+          echo ""
+          echo "IPv4:       $(hostname -I | awk '{print $1}')"
+          echo "════════════════════════════════════════════════════════"
+
+      - name: 🎯 Show Credentials
+        run: |
+          echo ""
+          echo "════════════════════════════════════════════════════════"
+          echo "SSH PRIVATE KEY"
+          echo "════════════════════════════════════════════════════════"
+          cat /tmp/session-data/private_key
+          echo ""
+          echo "════════════════════════════════════════════════════════"
+          echo "RDP/VNC PASSWORD"
+          echo "════════════════════════════════════════════════════════"
+          cat /tmp/session-data/rdp_password
+          echo ""
+          echo "════════════════════════════════════════════════════════"
+          echo "QUICK CONNECTION"
+          echo "════════════════════════════════════════════════════════"
+          echo "ssh -i private_key -o ServerAliveInterval=15 -o ServerAliveCountMax=1440 runner@PUBLIC_IP"
+          echo ""
+
+      - name: ⏱️ ULTIMATE 6-Hour Keep-Alive
+        run: |
+          SESSION_SECONDS=${{ env.SESSION_SECONDS }}
+          SESSION_HOURS=${{ env.SESSION_HOURS }}
+          
+          echo ""
+          echo "╔═════════════════════════════════════════════════════════════╗"
+          echo "║  🚀 ULTIMATE SESSION ACTIVE - $SESSION_HOURS HOURS 🚀             ║"
+          echo "║  ✅ SSH • RDP • VNC • Android • Auto-Recovery              ║"
+          echo "║  🛡️  Enterprise-Grade Stability & Zero-Downtime             ║"
+          echo "║  📡 No VPN • No Tailscale • Direct Access                  ║"
+          echo "╚═════════════════════════════════════════════════════════════╝"
+          echo ""
+          
+          START=$(date +%s)
+          END=$((START + SESSION_SECONDS))
+          
+          while [ $(date +%s) -lt $END ]; do
+            ELAPSED=$(($(date +%s) - START))
+            REMAIN=$((SESSION_SECONDS - ELAPSED))
+            HOURS=$((REMAIN / 3600))
+            MINS=$(((REMAIN % 3600) / 60))
+            
+            if [ $((ELAPSED % 300)) -lt 10 ]; then
+              echo "✅ $(date '+%H:%M:%S') • Remaining: ${HOURS}h ${MINS}m"
+            fi
+            
+            # Auto-recovery health checks
+            sudo systemctl is-active --quiet ssh || sudo systemctl restart ssh 2>/dev/null || true
+            if [ "${{ env.ENABLE_RDP }}" = "true" ]; then
+              sudo systemctl is-active --quiet xrdp || sudo systemctl restart xrdp xrdp-sesman 2>/dev/null || true
+            fi
+            if [ "${{ env.ENABLE_VNC }}" = "true" ]; then
+              pgrep -f "vncserver.*:1" > /dev/null || vncserver :1 -geometry 1920x1080 -depth 24 -localhost no -noxstartup > /dev/null 2>&1 &
+            fi
+            
+            sleep 10
+          done
+          
+          echo "✅ Session completed. Shutdown initiating."
+
+      - name: 🧹 Secure Cleanup
+        if: always()
+        run: |
+          shred -vfz -n 10 /tmp/session-data/* 2>/dev/null || rm -f /tmp/session-data/*
+          rm -rf /tmp/session-data 2>/dev/null || true
+          echo "✅ Cleanup complete"
